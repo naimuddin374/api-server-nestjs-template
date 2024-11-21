@@ -2,10 +2,10 @@ import { ContextConfigDefault, FastifyRequest, RawRequestDefaultExpression, RawS
 
 export interface User {
   id: number;
-  groups: string[];
   userId: string;
   userEmail: string;
-  role: string;
+  userName: string;
+  userRole: string;
 }
 
 export interface UserRawRequest extends RawRequestDefaultExpression {

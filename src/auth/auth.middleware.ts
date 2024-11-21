@@ -1,6 +1,7 @@
 import { Injectable, Logger, NestMiddleware, UnauthorizedException } from "@nestjs/common";
 import { decode, JwtPayload, verify } from "jsonwebtoken";
 import jwkToPem from "jwk-to-pem";
+import { CognitoWrapper } from "../util/cognitoWrapper";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const jwk: { keys: PublicKey[] } = require(`../../${process.env.JKS_FILE}.json`);
 
@@ -31,6 +32,7 @@ const pemMap = jwk.keys.reduce((result: { [key: string]: string }, key) => {
 @Injectable()
 export class AuthMiddleware implements NestMiddleware {
   private readonly logger = new Logger(AuthMiddleware.name);
+  private readonly cognitoWrapper = new CognitoWrapper()
 
   private verifyJwt(token: string, accessPem?: string): CognitoToken {
     if (accessPem === undefined) {
@@ -58,7 +60,7 @@ export class AuthMiddleware implements NestMiddleware {
     return decodedToken.header.kid;
   }
 
-  public use(req: any, _: any, next: (error?: unknown) => void) {
+  public async use(req: any, _: any, next: (error?: unknown) => void) {
     const token = req.headers["authorization"] as string;
 
     try {
@@ -66,38 +68,50 @@ export class AuthMiddleware implements NestMiddleware {
         this.logger.log("No token provided");
         throw new UnauthorizedException("No token provided");
       }
+      // console.log('req headers = ', req.headers);
 
-      console.log('req headers = ', req.headers);
+      const keyId = this.getKeyId(token);
+      const decoded = this.verifyJwt(token, pemMap[keyId]);
+      const userId = decoded.sub;
 
-      if (req.headers.requesttype && req.headers.requesttype == 'server_cron') {
-        console.log('inside req.header.requestType block');
-        // check the
-        if (req.originalUrl.includes('dataset/bulkInsert')) {
-          // verify the access token
-          if (token == process.env.CRON_JOB_TOKEN) {
-            next();
-          }
-          else throw new UnauthorizedException('Invalid Token');
-        }
+      // Get cogntio user info
+      const cognitoUser = await this.cognitoWrapper.getCognitoUser(userId)
+      if (!cognitoUser) {
+        throw new UnauthorizedException("Invalid Token");
       }
-      else {
-        const keyId = this.getKeyId(token);
-        const decoded = this.verifyJwt(token, pemMap[keyId]);
-        const groups = decoded["cognito:groups"];
-        let userId = decoded.sub;
-        // handle special account switching for admin users who request an account of another user
-        if (groups && groups.includes("admin")) {
-          if (req.headers["x-user-id"]) {
-            userId = req.headers["x-user-id"] as string;
-            this.logger.log(`Admin user: ${decoded.sub} is impersonating ${userId}`);
-          }
-        }
-        req.user = {
-          userId: userId,
-          groups: groups,
-        };
-        next();
+      
+      if (!cognitoUser.Enabled) {
+        throw new UnauthorizedException("Your account is disabled");
       }
+      let userEmail = ""
+      let userRole = ""
+      let userName = ""
+      if (cognitoUser.Attributes && cognitoUser.Attributes.length > 0) {
+        cognitoUser.Attributes.forEach(element => {
+          if (element.Value) {
+            switch (element.Name) {
+              case "email":
+                userEmail = element.Value
+                break;
+              case "custom:role":
+                userRole = element.Value
+                break;
+              case "given_name":
+                const lastName = cognitoUser.Attributes?.find(e => e.Name === "family_name" && e.Value)?.Value
+                userName = `${element.Value} ${lastName}`
+                break;
+            }
+          }
+        })
+      }
+
+      req.user = {
+        userId,
+        userEmail,
+        userRole,
+        userName,
+      };
+      next();
     } catch (error: unknown) {
       // To end the request lifecycle we need to call next even if we throw an exception during the process.
       next(error);

@@ -1,141 +1,81 @@
 const configuration = process.env.NODE_ENV || "development";
+console.log('configuration=', configuration)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 require("dotenv").config({ path: `.env.${configuration}` });
 
-import compression from "@fastify/compress";
-import cors, { FastifyCorsOptions } from "@fastify/cors";
-import { fastifyHelmet } from "@fastify/helmet";
-import { BadRequestException, ValidationPipe } from "@nestjs/common";
-import { HttpAdapterHost, NestFactory } from "@nestjs/core";
-import {
-  FastifyAdapter,
-  NestFastifyApplication,
-} from "@nestjs/platform-fastify";
-import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
-import fs from "fs";
-import { PinoLogger } from "nestjs-pino";
-import { IS_PROD } from "./util/config";
-import { AppModule } from "./app.module";
-
-import { TagModule } from "./tag/tag.module";
-import { HealthModule } from "./health/health.module";
+import { NestFactory } from '@nestjs/core';
+import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { ValidationPipe, Logger } from '@nestjs/common';
+import compression from '@fastify/compress';
+import cors from '@fastify/cors';
+import { fastifyHelmet } from '@fastify/helmet';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { AppModule } from './app.module';
+import { ResponseInterceptor } from './common/response.interceptor';
+import fs from 'fs';
+import { IS_PROD } from './util/config';
+console.log('IS_PROD=', IS_PROD)
 
 async function bootstrap() {
+  const logger = new Logger('Bootstrap');
+
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter()
+    new FastifyAdapter({ logger: false }) // Use LoggerModule for centralized logging
   );
-  // configure error handling
-  const httpAdapter = app.get(HttpAdapterHost);
-  const logger = await app.resolve(PinoLogger);
 
-  // configure compression
-  app.register(compression, { encodings: ["gzip", "deflate"] });
+  // Enable compression
+  await app.register(compression, { encodings: ['gzip', 'deflate'] });
 
-  // cors
-  let corsConfig: FastifyCorsOptions | undefined = undefined;
-  console.log("IS_PROD = ", IS_PROD);
-  if (IS_PROD) {
-    corsConfig = {
-      optionsSuccessStatus: 200, // some legacy browsers (IE11, various SmartTVs) choke on 204
-      origin: function (
-        origin: string,
-        callback: (error: any, isValid: boolean) => void
-      ) {
-        if (!origin ||
-          (origin.startsWith("https://") &&
-            (origin.endsWith("vendidit.com") || origin === "*")) ||
-          origin === "http://localhost:3000" ||
-          origin === "http://localhost:4002"
-        ) {
-          callback(null, true);
-        } else {
-          callback(
-            new BadRequestException("CORS: Origin is not authorized"),
-            false
-          );
-        }
-      },
-    };
-  }
-  app.register(cors, corsConfig);
+  // Enable CORS
+  await app.register(cors, {
+    origin: (origin, cb) => {
+      if (!origin || origin.startsWith('http://localhost')) {
+        cb(null, true);
+      } else {
+        cb(new Error('Not allowed by CORS'), false);
+      }
+    },
+  });
 
-  // helmet
-  const helmetOptions = IS_PROD
-    ? undefined
-    : {
-      contentSecurityPolicy: {
-        directives: {
-          defaultSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'"],
-          imgSrc: ["'self'", "data:", "validator.swagger.io"],
-          scriptSrc: ["'self'", "https: 'unsafe-inline'"],
-        },
-      },
-    };
-  app.register(fastifyHelmet, helmetOptions);
+  // Add Helmet for security
+  await app.register(fastifyHelmet);
 
-  // Validation
+  // Add global validation pipes
   app.useGlobalPipes(
     new ValidationPipe({
-      disableErrorMessages: false,
       transform: true,
       whitelist: true,
+      forbidNonWhitelisted: true,
     })
   );
 
-  // needs to happen last - https://github.com/nestjs/swagger/issues/197
-  if (IS_PROD) {
-    // configure swagger
-    const packageDataRaw = fs.readFileSync("./package.json");
-    const packageData = JSON.parse(packageDataRaw.toString());
-    const operationIdFactory = (controllerKey: string, methodKey: string) =>
-      `${methodKey}`;
+  // Add a global response interceptor
+  app.useGlobalInterceptors(new ResponseInterceptor());
 
-    // NonAdmin Swagger Setup
-    const nonAdminSwaggerOptions = new DocumentBuilder()
-      .setTitle("Main Service API")
-      .setDescription("Main Service API")
+  // Setup Swagger documentation
+  // if (!IS_PROD) {
+    const packageData = JSON.parse(fs.readFileSync('./package.json').toString());
+
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('Main Service API')
+      .setDescription('API documentation for the main service')
       .setVersion(packageData.version)
-      .addBearerAuth({
-        type: "apiKey",
-        name: "authorization",
-        in: "header",
-      })
+      .addBearerAuth( {
+          type: "apiKey",
+          name: "authorization",
+          in: "header",
+        } )
       .build();
-    const nonAdminSwaggerDocument = SwaggerModule.createDocument(
-      app,
-      nonAdminSwaggerOptions,
-      {
-        operationIdFactory,
-        include: [
-          TagModule,
-          HealthModule
-        ],
-      }
-    );
-    SwaggerModule.setup("main/docs", app, nonAdminSwaggerDocument);
 
-    // Admin Swagger Setup
-    const adminSwaggerOptions = new DocumentBuilder()
-      .setTitle("Main Service Admin API")
-      .setDescription("Main Service Admin API")
-      .setVersion(packageData.version)
-      .addBearerAuth({
-        type: "apiKey",
-        name: "authorization",
-        in: "header",
-      })
-      .build();
-  }
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('main/docs', app, document);
+  // }
 
-  // start server
-  await app.listen(process.env.PORT || 3000, "0.0.0.0", (err, address) => {
-    if (err) {
-      logger.error(err);
-      process.exit(1);
-    }
-    logger.info(`server listening on ${address}`);
-  });
+  // Start the server
+  const port = process.env.PORT || 4002;
+  await app.listen(port, '0.0.0.0');
+  logger.log(`Application is running on http://localhost:${port}`);
 }
+
 bootstrap();

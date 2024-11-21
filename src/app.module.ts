@@ -13,53 +13,84 @@ import { AuthMiddleware } from "./auth/auth.middleware";
 import { RolesGuard } from "./auth/roles.guard";
 
 import { IS_PROD } from "./util/config";
-
 import { IncomingMessage } from "http";
 import { TagModule } from "./tag/tag.module";
 import { HealthModule } from "./health/health.module";
+import { ProfilesModule } from "./profiles/profiles.module";
 
 const REQUEST_ID_HEADER = "x-request-id";
 
 const commonDbConfigs: TypeOrmModuleOptions = {
   type: "postgres",
-  host: process.env.DB_HOST || "localhost",
   port: Number(process.env.DB_PORT) || 5432,
-  synchronize: true,
   logging: false,
+  host: process.env.DB_HOST || "localhost",
+  username: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
+  synchronize: true,
+  autoLoadEntities: true,
 };
+
 @Module({
   imports: [
     LoggerModule.forRoot({
       pinoHttp: {
-        level: IS_PROD ? "debug" : "info",
-        transport: undefined,
-        genReqId: (req: IncomingMessage) => {
-          const requestIdHeader = req.headers[REQUEST_ID_HEADER];
-          return requestIdHeader ? requestIdHeader : uuid();
-        },
+        level: IS_PROD ? 'info' : 'debug',
+        transport: !IS_PROD
+          ? {
+              target: 'pino-pretty',
+              options: {
+                singleLine: true,
+                colorize: true,
+                translateTime: 'SYS:standard',
+                ignore: 'pid,hostname',
+              },
+            }
+          : undefined,
+        genReqId: (req: IncomingMessage) =>
+          req.headers[REQUEST_ID_HEADER]
+            ? String(req.headers[REQUEST_ID_HEADER])
+            : uuid(),
         serializers: {
           req: (req: IncomingMessage) => ({
-            id: req.id,
             method: req.method,
             url: req.url,
           }),
-          res: (res: IncomingMessage) => ({
+          res: (res) => ({
             statusCode: res.statusCode,
           }),
+        },
+        customLogLevel: (req, res, err) => {
+          if (req.url?.includes('public/health')) {
+            return 'silent'; // Suppress health check logs
+          }
+          if (res.statusCode >= 500 || err) {
+            return 'error'; // Error level for 5xx and unhandled exceptions
+          } else if (res.statusCode >= 400) {
+            return 'warn'; // Warning for 4xx responses
+          }
+          return 'info'; // Info level for successful requests
+        },
+        customSuccessMessage: (req, res) => {
+          // Ensure success messages always show a valid status
+          return `Request completed with status ${res?.statusCode || 'unknown'}`;
+        },
+        customErrorMessage: (error: any, res) => {
+          // Include error details and ensure the status code is shown
+          const message = error?.message || 'An unknown error occurred';
+          const statusCode = res?.statusCode || 'unknown';
+          return `Error occurred: ${message} | Status: ${statusCode}`;
         },
       },
     }),
     TypeOrmModule.forRoot({
       ...commonDbConfigs,
-      username: process.env.DB_USER,
-      password: process.env.DB_PASS,
-      database: process.env.DB_NAME,
-      synchronize: true,
-      autoLoadEntities: true,
       entities: [join(__dirname, "**", "*.entity.{ts,js}")],
     }),
     TagModule,
-    HealthModule
+    HealthModule,
+    ProfilesModule,
   ],
   controllers: [],
   providers: [
@@ -76,9 +107,8 @@ export class AppModule implements NestModule {
       .exclude(
         { path: "main/docs/(.*)", method: RequestMethod.GET },
         { path: "main/public/(.*)", method: RequestMethod.ALL },
-        { path: "main/docs-json", method: RequestMethod.GET }
+        { path: "main/docs-json", method: RequestMethod.GET },
       )
-      // need to make sure we don't include OPTIONS otherwise preflight CORs requests will have require authentication
       .forRoutes(
         { path: "/*", method: RequestMethod.POST },
         { path: "/*", method: RequestMethod.PUT },
